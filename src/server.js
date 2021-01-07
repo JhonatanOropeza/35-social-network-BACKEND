@@ -37,7 +37,6 @@ app.use(cookieParser());
 app.use(cors());
 app.use(helmet());
 
-
 // This middleware adds the json header to every response
 app.use('*', (req, res, next) => {
     res.setHeader('Content-Type', 'application/json');
