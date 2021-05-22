@@ -2,37 +2,63 @@ const path = require('path');
 const fse = require('fs-extra');
 const uuid4 = require('uuid4');
 const moment = require('moment');
+const fs = require('fs');
+//AWS
+const AWS  = require('aws-sdk');
+var s3Client = new AWS.S3({
+    accessKeyId: "AKIATKMHJKLLTOKQQSVR",
+    secretAccessKey: "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"
+});
+
+//Models
 const Post = require('../../models/collections/post');
 const Amistad = require('../../models/collections/amistades');
 const Like = require('../../models/collections/likes');
 
 const post_Controller = {};
 
+AWS.config.update({
+    accessKeyId: "AKIATKMHJKLLQTFFCQPH",
+    secretAccessKey: "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",
+    region: 'us-east-2' 
+});
+
 const { APP_IMAGE_ROUTE_POST } = process.env;
 
 post_Controller.loadingImage = async (req, res) => {
     //let contentType = req.get('content-type');
+    //1.- Getting the new name for the image
     const newName = uuid4();
-    const imageTempPath = req.file.path;//Where it was stored
-    const extension = path.extname(req.file.originalname).toLowerCase();
-
+    const imageTempPath = req.file.path;//Where it was stored with MULTER
+    const extension = path.extname(req.file.originalname).toLowerCase();//Getting the extension
+    //2.- Checking if the file's extension is acceptable
+    if (extension !== '.png' && extension !== '.jpg' && extension !== '.jpeg' && extension !== '.gif') {
+        return res.status(402).send({ message: 'Archivo con extensión erronea. Intente con otro archivo.' });
+    }
+    //3.- Charging the file to server
+    //3.1 Localhost for develop
     const finalPath = path.resolve(`src/public/images/final/${newName}${extension}`);
     const finalPathSecondary = (APP_IMAGE_ROUTE_POST.concat(`${newName}${extension}`));
+                                //http://127.0.0.1:8887/
+    //3.2 AWS for production
+    const finalPathInProduction = `images/${newName}${extension}`;
+    await s3Client.putObject({
+        Body: fs.readFileSync(req.file.path),
+        Bucket: '35socialmediapublic',
+        Key: finalPathInProduction,
+        ACL:'public-read'
+      }).promise()
+    
+    return res.status(201).json({url: `https://35socialmediapublic.s3.us-east-2.amazonaws.com/images/${newName}${extension}`})
 
-    if (extension === '.png' || extension === '.jpg' || extension === '.jpeg' || extension === '.gif') {
-        try {
-            await fse.move(imageTempPath, finalPath);
-            res.status(201).json({
-                url: finalPathSecondary
-            })
-        } catch (error) {
-            console.log(error);
-        }
-    } else {
-        res.status(422).send({
-            message: 'File with wrong extension'
-        })
-    }
+    /* try {
+        await fse.move(imageTempPath, finalPath);
+        return res.status(201).json({url: finalPathSecondary})
+    } catch (error) {
+        console.log(error);
+        return res.status(422).send({ message: 'Error to save file in localhost' });
+    } */
+
 }
 
 post_Controller.loadingImageWithData = async (req, res) => {
@@ -61,6 +87,7 @@ post_Controller.loadingImageWithData = async (req, res) => {
 
 post_Controller.getImagesForFeed = async (req, res) => {
     //Here, we get POSTS, 3 BY 3
+    //1.- Stablishing the number of page for the feed
     const userFollowing = req.user;
     let ActualPage = 1;
     actualPage = req.params.page;
@@ -68,7 +95,7 @@ post_Controller.getImagesForFeed = async (req, res) => {
         ActualPage = actualPage;
     }
 
-    //1.- Obteniendo los seguidores del usuario
+    //2.- Obteniendo los seguidores del usuario
     await Amistad.find({ usuario: userFollowing }, 'seguidor')
         .populate({ path: 'seguidor' })
         .exec((err, seguidores) => {
@@ -79,13 +106,15 @@ post_Controller.getImagesForFeed = async (req, res) => {
             if (!seguidores) {
                 return res.status(422).send({ message: 'Aún no estas siguiendo a alguien (1)' });
             }
-            //2.- Guardando los _id de los seguidores en un arreglo
+            //3.- Guardando los _id de los seguidores en un arreglo
             var seguidoresClean = [];
             seguidores.forEach((seguidor2) => {
                 seguidoresClean.push(seguidor2.seguidor._id);
             });
-
-            //3.- Buscando publicaciones de los seguidores (seguidoresClean)            
+            //3.2.- A Los id de los seguidore agregamos el id del usuario para poder visualizar
+            //en el feed las publicaicones de todos los seguidores y del usuario
+            seguidoresClean.push(req.user._id);
+            //4.- Buscando publicaciones de los seguidores (seguidoresClean)            
             const optionsOfPagiante = {
                 page: ActualPage,
                 limit: 3,
@@ -110,7 +139,7 @@ post_Controller.getImagesForFeed = async (req, res) => {
                 if (result.docs.length === 0) {
                     return res.status(201).send(result);
                 }
-                //4.- Agregar el estado "estalike"               
+                //5.- Agregar el estado "estalike"               
                 const estadosConLike = await agregarEstadoLike(userFollowing._id, result.docs);
                 var aux = {};
                 aux = result;
@@ -194,7 +223,7 @@ post_Controller.getOnePost = async (req, res) => {
         }
         // Agregar el estado "estalike"               
         const postConLike = await agregarEstadoLike(user, result);
-        
+
         return res.status(200).send(postConLike);
     } catch (error) {
         return res.status(404).send({ message: 'Id del post mal escrito' });
@@ -203,15 +232,16 @@ post_Controller.getOnePost = async (req, res) => {
 
 post_Controller.getPostsOfOneUser = async (req, res) => {
     const user = req.params.id;
-    const result = await Post.find({ usuario: user}).limit(18);
+    const result = await Post.find({ usuario: user }).sort({fechaCreacion: -1}).limit(18);
+    
     try {
         if (result.length === 0) {
-            return res.status(200).send({ message: 'No hay resultados de la busqueda'})
+            return res.status(200).send({ message: 'No hay resultados de la busqueda' })
         }
         return res.status(200).send(result);
     } catch (error) {
         console.log(error);
-        res.status(404).send({ message:'Problema en el servidor para encontrar publicaciones'})
+        res.status(404).send({ message: 'Problema en el servidor para encontrar publicaciones' })
     }
 }
 module.exports = post_Controller;
